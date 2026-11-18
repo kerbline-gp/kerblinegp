@@ -812,9 +812,9 @@ let raceTime = 0, cdTime = 0, lightsOutAt = 5, finishCount = 0, resultsAt = -1;
 let LAPS = 3, diff = 'rookie', trackIdx = 0, startTyre = 'M', camMode = 'chase', steerPref = 'normal', kbBot = false;
 // player steering feel. rise: lock gained per second while held; fall: per second back to centre; hiCap: most lock at top speed
 const STEER = {
-  gentle: { rise: 1.6, fall: 4.5, hiCap: 0.5 },
-  normal: { rise: 2.4, fall: 5.5, hiCap: 0.62 },
-  sharp:  { rise: 4.0, fall: 7.0, hiCap: 0.8 },
+  gentle: { rise: 1.5, fall: 4.0, hiCap: 0.72 },
+  normal: { rise: 2.0, fall: 5.0, hiCap: 0.8 },
+  sharp:  { rise: 3.0, fall: 6.0, hiCap: 0.9 },
 };
 let bestSec = [null, null, null], secCls = ['', '', ''], secTxt = ['S1', 'S2', 'S3'];
 let curTrace = new Float32Array(1), bestTrace = null;
@@ -984,11 +984,18 @@ function physics(c, dt, thr, brk, str) {
     // and the most lock a key can ask for shrinks with speed so a tap at 300 km/h is a nudge, not a swerve
     const s = STEER[steerPref], target = str * (1 - (1 - s.hiCap) * Math.min(1, spd / VMAX));
     const windingOn = target !== 0 && Math.sign(target) === Math.sign(c.steer || target) && Math.abs(target) > Math.abs(c.steer);
-    const rate = windingOn ? s.rise : s.fall;
+    // ease-in: lock builds at half speed for a quick tap and up to double speed after ~0.5 s of holding the key
+    c.holdT = str !== 0 && Math.sign(str) === Math.sign(c.lastStr || 0) ? (c.holdT || 0) + dt : 0; c.lastStr = str;
+    const rate = windingOn ? s.rise * (0.5 + 1.5 * Math.min(1, c.holdT / 0.5)) : s.fall;
     c.steer += Math.max(-rate * dt, Math.min(rate * dt, target - c.steer));
   }
   const maxYaw = Math.min(3.2, ALAT * grip / Math.max(spd, 1));
-  const yaw = c.steer * maxYaw * Math.min(spd / 40, 1) * (vF >= 0 ? 1 : -1);
+  let yaw = c.steer * maxYaw * Math.min(spd / 40, 1) * (vF >= 0 ? 1 : -1);
+  if (!c.ai) {
+    // yaw inertia: the car takes ~0.1 s to settle into the rotation the steering asks for, instead of snapping to it
+    c.yawRate = (c.yawRate || 0) + (yaw - (c.yawRate || 0)) * (1 - Math.exp(-dt / 0.1));
+    yaw = c.yawRate;
+  }
   c.h += yaw * dt;
   vF -= Math.abs(c.steer) * vF * 0.16 * dt;
   c.vx = fx * vF - fy * vL; c.vy = fy * vF + fx * vL;
@@ -1057,7 +1064,7 @@ function pitMove(c, dt) {
   c.idx = Math.floor(P.pf) % N; c.d = (pitOffset(P.pf) + P.d0 * (1 - blend)) * pitSide; c.grass = false;
   laps(c, prev);
   c.progress = c.lap * N + c.idx;
-  if (P.phase === 'out' && (r >= PIT_OUT || r < -PIT_IN)) { c.pit = null; c.d = 0; }
+  if (P.phase === 'out' && (r >= PIT_OUT || r < -PIT_IN)) { c.pit = null; c.d = 0; c.yawRate = 0; c.steer = 0; }
 }
 function pathAt(pf, off) {
   const i = Math.floor(pf) % N, j = (i + 1) % N, f = pf - Math.floor(pf), s = pitSide * off;
@@ -1125,7 +1132,7 @@ function aiControl(c, dt) {
     if (gap > 0 && gap < 80 && Math.abs(o.d - c.lane) < 20) { c.laneT = Math.max(-HALF + 12, Math.min(HALF - 12, o.d > 0 ? o.d - 28 : o.d + 28)); c.laneTimer = 1.5; }
   }
   c.lane += (c.laneT - c.lane) * Math.min(1, dt * 1.6);
-  const look = 34 + 0.45 * Math.abs(c.vF), j = (c.idx + Math.round(look / DS)) % N;
+  const look = 34 + (kbBot && c === player ? 0.75 : 0.45) * Math.abs(c.vF), j = (c.idx + Math.round(look / DS)) % N;   // test bot anticipates like a human would
   const tx = PX[j] + NX[j] * c.lane, ty = PY[j] + NY[j] * c.lane;
   let dA = Math.atan2(ty - c.y, tx - c.x) - c.h;
   while (dA > Math.PI) dA -= 2 * Math.PI; while (dA < -Math.PI) dA += 2 * Math.PI;
@@ -1174,7 +1181,7 @@ function update(dt) {
     if (c.progress > c.bestProg + 2) { c.bestProg = c.progress; c.stuck = 0; } else c.stuck += dt;
     if (c.stuck > 3 && raceTime > 4 && (c.ai || Math.abs(c.d) > HALF)) {
       const i = (c.idx + 3) % N; c.x = PX[i]; c.y = PY[i]; c.h = Math.atan2(TY[i], TX[i]);
-      c.vx = TX[i] * 75; c.vy = TY[i] * 75; c.stuck = 0; c.d = 0; c.resets++;
+      c.vx = TX[i] * 75; c.vy = TY[i] * 75; c.stuck = 0; c.d = 0; c.resets++; c.yawRate = 0; c.steer = 0;
       if (c === player) banner('Recovered', 'small', 1);
     }
   }
@@ -1237,14 +1244,16 @@ function updateCamera(dt) {
     camLook.set(x + fx * 7, 0.9, z + fz * 7);
     fov = 60;
   } else if (camMode === 'tcam') {
-    camH = c.h;
-    camPos.set(x - fx * 0.95, 1.5, z - fz * 0.95);       // pod on top of the airbox, behind the driver's head
-    camLook.set(x + fx * 40, 0.1, z + fz * 40);
+    camH += dh * Math.min(1, dt * 9);                     // a touch of lag so small corrections don't jerk the view
+    const hx = Math.cos(camH), hz = Math.sin(camH);
+    camPos.set(x - hx * 0.95, 1.5, z - hz * 0.95);       // pod on top of the airbox, behind the driver's head
+    camLook.set(x + hx * 40, 0.1, z + hz * 40);
     fov = 64;
   } else {
-    camH = c.h;
+    camH += dh * Math.min(1, dt * 11);                    // the driver's head lags the car very slightly
+    const hx = Math.cos(camH), hz = Math.sin(camH);
     camPos.set(x + fx * 0.04, 0.9, z + fz * 0.04);        // driver's eye line, inside the halo
-    camLook.set(x + fx * 30, 0.75, z + fz * 30);
+    camLook.set(x + hx * 30, 0.75, z + hz * 30);
     fov = 76;
   }
   if (!reduceMotion) fov += 7 * Math.min(1, c.spd / VMAX);
