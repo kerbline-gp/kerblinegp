@@ -261,6 +261,8 @@ tr.me td { color: var(--flag); }
       <div class="opt"><span class="label">Camera</span>
         <div class="seg" id="camSeg"><button type="button" data-v="tcam">TV pod</button><button type="button" data-v="chase">Chase</button><button type="button" data-v="cockpit">Cockpit</button></div></div>
     </div>
+    <div class="opt"><span class="label">Steering</span>
+      <div class="seg" id="steerSeg"><button type="button" data-v="gentle">Gentle</button><button type="button" data-v="normal">Normal</button><button type="button" data-v="sharp">Sharp</button></div></div>
     <div class="btns"><button class="btn" id="startBtn" type="button">Start race</button><button class="btn ghost" id="onlineBtn" type="button">Race online</button></div>
     <p class="err" id="glErr" hidden>This browser couldn't start 3D graphics (WebGL). Try another browser, or turn on hardware acceleration.</p>
     <div class="keys">
@@ -807,7 +809,13 @@ const esc = s => String(s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;
 let cars = [], player = null;
 let state = 'menu', paused = false;
 let raceTime = 0, cdTime = 0, lightsOutAt = 5, finishCount = 0, resultsAt = -1;
-let LAPS = 3, diff = 'rookie', trackIdx = 0, startTyre = 'M', camMode = 'chase';
+let LAPS = 3, diff = 'rookie', trackIdx = 0, startTyre = 'M', camMode = 'chase', steerPref = 'normal', kbBot = false;
+// player steering feel. rise: lock gained per second while held; fall: per second back to centre; hiCap: most lock at top speed
+const STEER = {
+  gentle: { rise: 1.6, fall: 4.5, hiCap: 0.5 },
+  normal: { rise: 2.4, fall: 5.5, hiCap: 0.62 },
+  sharp:  { rise: 4.0, fall: 7.0, hiCap: 0.8 },
+};
 let bestSec = [null, null, null], secCls = ['', '', ''], secTxt = ['S1', 'S2', 'S3'];
 let curTrace = new Float32Array(1), bestTrace = null;
 const store = {
@@ -819,6 +827,7 @@ const store = {
 { const v = parseInt(store.get('track')); if (v >= 0 && v < TRACKS.length) trackIdx = v; }
 { const v = store.get('tyre'); if (TYRES[v]) startTyre = v; }
 { const v = store.get('cam'); if (['tcam', 'chase', 'cockpit'].includes(v)) camMode = v; }
+{ const v = store.get('steer'); if (STEER[v]) steerPref = v; }
 const bestFor = id => { const v = parseFloat(store.get('best-' + id)); return v > 0 ? v : null; };
 
 const tyreLife = k => TYRES[k].life * Math.max(LAPS, 2.5) / 20;          // in laps, scaled so strategy matters in short races
@@ -968,9 +977,16 @@ function physics(c, dt, thr, brk, str) {
   if (!thr && !brk && Math.abs(vF) < 5) vF = 0;
   if (vF < -105) vF = -105;
   vL *= Math.exp(-(grass ? 3.5 : 11 * gf) * dt);
-  const rate = c.ai ? 8 : 5.5;
-  c.steer += Math.max(-rate * dt, Math.min(rate * dt, str - c.steer));
   const spd = Math.abs(vF);
+  if (c.ai) c.steer += Math.max(-8 * dt, Math.min(8 * dt, str - c.steer));
+  else {
+    // keyboard-friendly: lock winds on while a key is held, snaps back faster when released,
+    // and the most lock a key can ask for shrinks with speed so a tap at 300 km/h is a nudge, not a swerve
+    const s = STEER[steerPref], target = str * (1 - (1 - s.hiCap) * Math.min(1, spd / VMAX));
+    const windingOn = target !== 0 && Math.sign(target) === Math.sign(c.steer || target) && Math.abs(target) > Math.abs(c.steer);
+    const rate = windingOn ? s.rise : s.fall;
+    c.steer += Math.max(-rate * dt, Math.min(rate * dt, target - c.steer));
+  }
   const maxYaw = Math.min(3.2, ALAT * grip / Math.max(spd, 1));
   const yaw = c.steer * maxYaw * Math.min(spd / 40, 1) * (vF >= 0 ? 1 : -1);
   c.h += yaw * dt;
@@ -1152,6 +1168,7 @@ function update(dt) {
     if (c.remote) continue;
     if (c.pit) { pitMove(c, dt); continue; }
     if (c.ai) { const ctl = aiControl(c, dt); physics(c, dt, ctl.thr, ctl.brk, ctl.str); }
+    else if (kbBot) { const ctl = aiControl(c, dt); physics(c, dt, ctl.thr, ctl.brk, ctl.str > 0.25 ? 1 : ctl.str < -0.25 ? -1 : 0); }   // test: AI choices through on/off keys
     else physics(c, dt, pThr, pBrk, pStr);
     // recovery: a car that makes no forward progress for 3 s (wedged on a wall, spun round) is put back on the racing line
     if (c.progress > c.bestProg + 2) { c.bestProg = c.progress; c.stuck = 0; } else c.stuck += dt;
@@ -1628,6 +1645,7 @@ seg('#lapsSeg', () => LAPS, v => { LAPS = +v; store.set('laps', v); });
 seg('#diffSeg', () => diff, v => { diff = v; store.set('diff', v); });
 seg('#tyreSeg', () => startTyre, v => { startTyre = v; store.set('tyre', v); });
 seg('#camSeg', () => camMode, v => { camMode = v; store.set('cam', v); });
+seg('#steerSeg', () => steerPref, v => { steerPref = v; store.set('steer', v); });
 function start() { if (!renderer) return; initAudio(); newRace(); }
 function toMenu() {
   state = 'menu'; paused = false;
