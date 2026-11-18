@@ -344,7 +344,8 @@ const $ = s => document.querySelector(s);
 const SCALE = 3.5;              // world px per surveyed metre
 const U = 0.2;                  // 3D metres per world px (car and track drawn at real-car proportions)
 const HALF = 40, KERB = 7, RUNOFF = 72, DS = 8, MARGIN = 520;
-const VMAX = 610, ACC = 350, BRAKE = 840, ALAT = 960, ALAT_AI = 806, BRAKE_AI = 650;
+// ACC/DRAG give ~1 s 0-100, ~3 s 0-200 and the same 324 km/h top speed; BRAKE ~6 g (was ~16 g). AI brakes a bit inside that.
+const VMAX = 610, ACC = 180, DRAG = 0.062, BRAKE = 300, ALAT = 960, ALAT_AI = 806, BRAKE_AI = 230;
 const KMH = 0.643, STEP = 1 / 120, CAR_R = 11;
 const PIT_IN = 80, PIT_OUT = 80, RAMP = 22, PIT_LIMIT = 80 / KMH, LANE_W = 14;
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -964,17 +965,27 @@ function locate(c) {
   c.idx = bj; c.d = (c.x - PX[bj]) * NX[bj] + (c.y - PY[bj]) * NY[bj];
 }
 
+// the human driver's keys go through this: pedals build up while a key is held (throttle ~0.4 s, brake ~0.3 s
+// to full) and come off quickly when it's released, like squeezing a real pedal instead of an on/off switch
+const approach = (v, to, rate, dt) => v + Math.max(-rate * dt, Math.min(rate * dt, to - v));
+function drive(c, dt, thrKey, brkKey, str) {
+  c.thrP = approach(c.thrP || 0, thrKey ? 1 : 0, thrKey ? 2.5 : 10, dt);
+  c.brkP = approach(c.brkP || 0, brkKey ? 1 : 0, brkKey ? 3.3 : 12, dt);
+  physics(c, dt, c.thrP, c.brkP, str);
+}
 function physics(c, dt, thr, brk, str) {
   const fx = Math.cos(c.h), fy = Math.sin(c.h);
   let vF = c.vx * fx + c.vy * fy, vL = -c.vx * fy + c.vy * fx;
   const grass = Math.abs(c.d) > HALF + KERB, gf = gripOf(c), grip = (grass ? 0.55 : 1) * gf;
   let a = 0;
-  if (thr) a += ACC * (1 - vF / VMAX) * (grass ? 0.6 : 1) * (0.85 + 0.15 * gf);
-  if (brk) a -= vF > 10 ? BRAKE * grip : 160;
-  a -= vF * (grass ? 0.9 : 0.12);
-  if (!thr && !brk) a -= Math.sign(vF) * 28;
+  // thr / brk are pedal amounts 0..1 (the AI passes true/false, which count as 1/0)
+  if (thr > 0) a += thr * ACC * (1 - vF / VMAX) * (grass ? 0.6 : 1) * (0.85 + 0.15 * gf);
+  if (brk > 0) a -= brk * (vF > 10 ? BRAKE * grip : 160);
+  a -= vF * (grass ? 0.9 : DRAG);
+  const coasting = thr < 0.05 && brk < 0.05;
+  if (coasting) a -= Math.sign(vF) * 28;
   vF += a * dt;
-  if (!thr && !brk && Math.abs(vF) < 5) vF = 0;
+  if (coasting && Math.abs(vF) < 5) vF = 0;
   if (vF < -105) vF = -105;
   vL *= Math.exp(-(grass ? 3.5 : 11 * gf) * dt);
   const spd = Math.abs(vF);
@@ -1013,7 +1024,7 @@ function physics(c, dt, thr, brk, str) {
   c.x += c.vx * dt; c.y += c.vy * dt;
   // tyre wear: distance, cornering load, heavy braking and grass all take life out of the set
   const lat = Math.min(1, Math.abs(yaw * spd) / (ALAT * grip));
-  const stress = 0.89 + 1.07 * lat + (brk && vF > 60 ? 0.5 : 0) + (grass ? 0.7 : 0);   // averages ~1.0 on a normal lap
+  const stress = 0.89 + 1.07 * lat + (vF > 60 ? 0.5 * brk : 0) + (grass ? 0.7 : 0);   // averages ~1.0 on a normal lap
   c.wear = Math.min(1.2, c.wear + spd * dt / CUMD[N] / c.life * stress);
 
   const prev = c.idx;
@@ -1186,8 +1197,8 @@ function update(dt) {
     if (c.remote) continue;
     if (c.pit) { pitMove(c, dt); continue; }
     if (c.ai) { const ctl = aiControl(c, dt); physics(c, dt, ctl.thr, ctl.brk, ctl.str); }
-    else if (kbBot) { const ctl = aiControl(c, dt); physics(c, dt, ctl.thr, ctl.brk, ctl.str > 0.25 ? 1 : ctl.str < -0.25 ? -1 : 0); }   // test: AI choices through on/off keys
-    else physics(c, dt, pThr, pBrk, pStr);
+    else if (kbBot) { const ctl = aiControl(c, dt); drive(c, dt, ctl.thr, ctl.brk, ctl.str > 0.25 ? 1 : ctl.str < -0.25 ? -1 : 0); }   // test: AI choices through on/off keys
+    else drive(c, dt, pThr, pBrk, pStr);
     // recovery: a car that makes no forward progress for 3 s (wedged on a wall, spun round) is put back on the racing line
     if (c.progress > c.bestProg + 2) { c.bestProg = c.progress; c.stuck = 0; } else c.stuck += dt;
     if (c.stuck > 3 && raceTime > 4 && (c.ai || Math.abs(c.d) > HALF)) {
@@ -1697,7 +1708,7 @@ $('#boxBtn').addEventListener('click', toggleBox);
 $('#muteBtn').addEventListener('click', () => { initAudio(); toggleMute(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden && !online.racing && !paused && (state === 'race' || state === 'countdown')) togglePause(); });
 
-$('#ver').textContent = 'Version ' + '18 Nov 19:41' + '.';   // stamped by tools/build.js, so you can tell which build you're playing
+$('#ver').textContent = 'Version ' + '18 Nov 19:45' + '.';   // stamped by tools/build.js, so you can tell which build you're playing
 if (!renderer) { $('#glErr').hidden = false; $('#startBtn').disabled = true; }
 selectTrack(trackIdx);
 
