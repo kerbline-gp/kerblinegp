@@ -217,6 +217,7 @@ tr.me td { color: var(--flag); }
 <div class="hud" id="hudbtns" hidden>
   <button class="ibtn" id="camBtn" type="button">Chase<kbd>C</kbd></button>
   <button class="ibtn" id="boxBtn" type="button">Box<kbd>B</kbd></button>
+  <button class="ibtn" id="ctrlHudBtn" type="button">Controls<kbd>O</kbd></button>
   <button class="ibtn" id="pauseBtn" type="button">Pause<kbd>P</kbd></button>
   <button class="ibtn" id="muteBtn" type="button">Sound on</button>
 </div>
@@ -279,6 +280,7 @@ tr.me td { color: var(--flag); }
       <span><kbd>T</kbd></span><span>Next tyre</span>
       <span><kbd>P</kbd></span><span>Pause</span>
       <span><kbd>M</kbd></span><span>Mute</span>
+      <span><kbd>O</kbd></span><span>Controls</span>
     </div>
     <div class="credit">Circuit layouts from the open f1-circuits dataset © 2019–2025 Tomislav Bacinger, MIT licence. Shapes are traced centre lines, scaled for arcade racing. Not affiliated with any racing series. <span id="ver"></span></div>
   </div>
@@ -937,6 +939,7 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyC') cycleCam();
   if (e.code === 'KeyB') toggleBox();
   if (e.code === 'KeyT') cycleNextTyre();
+  if (e.code === 'KeyO') { if ($('#controlsSheet').hidden) openControls(); else $('#controlsSheet').hidden = true; }
 });
 addEventListener('keyup', e => { const k = KEYMAP[e.code]; if (k) keys[k] = false; });
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
@@ -1731,6 +1734,7 @@ for (const [k, inp] of CTRL) $(inp).addEventListener('input', e => { controls[k]
 function openControls() { paintControls(); $('#controlsSheet').hidden = false; $('#cSteer').focus(); }
 $('#ctrlBtn').addEventListener('click', openControls);
 $('#ctrlBtn2').addEventListener('click', openControls);
+$('#ctrlHudBtn').addEventListener('click', openControls);
 $('#ctrlDone').addEventListener('click', () => { $('#controlsSheet').hidden = true; });
 $('#ctrlReset').addEventListener('click', () => { controls = Object.assign({}, CONTROL_DEFAULTS); saveControls(); });
 function start() { if (!renderer) return; initAudio(); newRace(); }
@@ -1764,7 +1768,7 @@ $('#boxBtn').addEventListener('click', toggleBox);
 $('#muteBtn').addEventListener('click', () => { initAudio(); toggleMute(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden && !online.racing && !paused && (state === 'race' || state === 'countdown')) togglePause(); });
 
-$('#ver').textContent = 'Version ' + '18 Nov 19:49' + '.';   // stamped by tools/build.js, so you can tell which build you're playing
+$('#ver').textContent = 'Version ' + '18 Nov 19:50' + '.';   // stamped by tools/build.js, so you can tell which build you're playing
 if (!renderer) { $('#glErr').hidden = false; $('#startBtn').disabled = true; }
 selectTrack(trackIdx);
 
