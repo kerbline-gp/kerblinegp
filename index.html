@@ -275,7 +275,7 @@ tr.me td { color: var(--flag); }
       <span><kbd>P</kbd></span><span>Pause</span>
       <span><kbd>M</kbd></span><span>Mute</span>
     </div>
-    <div class="credit">Circuit layouts from the open f1-circuits dataset © 2019–2025 Tomislav Bacinger, MIT licence. Shapes are traced centre lines, scaled for arcade racing. Not affiliated with any racing series.</div>
+    <div class="credit">Circuit layouts from the open f1-circuits dataset © 2019–2025 Tomislav Bacinger, MIT licence. Shapes are traced centre lines, scaled for arcade racing. Not affiliated with any racing series. <span id="ver"></span></div>
   </div>
 </div>
 
@@ -812,9 +812,9 @@ let raceTime = 0, cdTime = 0, lightsOutAt = 5, finishCount = 0, resultsAt = -1;
 let LAPS = 3, diff = 'rookie', trackIdx = 0, startTyre = 'M', camMode = 'chase', steerPref = 'normal', kbBot = false;
 // player steering feel. rise: lock gained per second while held; fall: per second back to centre; hiCap: most lock at top speed
 const STEER = {
-  gentle: { rise: 1.5, fall: 4.0, hiCap: 0.72 },
-  normal: { rise: 2.0, fall: 5.0, hiCap: 0.8 },
-  sharp:  { rise: 3.0, fall: 6.0, hiCap: 0.9 },
+  gentle: { full: 0.8, fall: 4.0, hiCap: 0.72 },
+  normal: { full: 0.6, fall: 5.0, hiCap: 0.8 },
+  sharp:  { full: 0.45, fall: 6.0, hiCap: 0.9 },
 };
 let bestSec = [null, null, null], secCls = ['', '', ''], secTxt = ['S1', 'S2', 'S3'];
 let curTrace = new Float32Array(1), bestTrace = null;
@@ -982,12 +982,23 @@ function physics(c, dt, thr, brk, str) {
   else {
     // keyboard-friendly: lock winds on while a key is held, snaps back faster when released,
     // and the most lock a key can ask for shrinks with speed so a tap at 300 km/h is a nudge, not a swerve
-    const s = STEER[steerPref], target = str * (1 - (1 - s.hiCap) * Math.min(1, spd / VMAX));
-    const windingOn = target !== 0 && Math.sign(target) === Math.sign(c.steer || target) && Math.abs(target) > Math.abs(c.steer);
-    // ease-in: lock builds at half speed for a quick tap and up to double speed after ~0.5 s of holding the key
-    c.holdT = str !== 0 && Math.sign(str) === Math.sign(c.lastStr || 0) ? (c.holdT || 0) + dt : 0; c.lastStr = str;
-    const rate = windingOn ? s.rise * (0.5 + 1.5 * Math.min(1, c.holdT / 0.5)) : s.fall;
-    c.steer += Math.max(-rate * dt, Math.min(rate * dt, target - c.steer));
+    // lock follows how long the key has been held, on a curve: (held / full)^2 of the available lock.
+    // A 0.15 s tap asks for ~6% lock, 0.3 s ~25%, full lock after `full` seconds. Pressing again while the wheel
+    // is still turned carries on from the current lock, so pulsing the key feathers it.
+    const s = STEER[steerPref], cap = 1 - (1 - s.hiCap) * Math.min(1, spd / VMAX);
+    if (str !== 0) {
+      const same = Math.sign(c.steer) === Math.sign(str) || c.steer === 0;
+      if (!same) c.holdT = 0;
+      else if (Math.sign(c.lastStr || 0) !== Math.sign(str)) c.holdT = s.full * Math.sqrt(Math.min(1, Math.abs(c.steer) / cap));
+      c.holdT = (c.holdT || 0) + dt;
+      const want = str * cap * Math.min(1, (c.holdT / s.full) ** 2);
+      if (same) c.steer = want;
+      else c.steer += Math.max(-s.fall * dt, Math.min(s.fall * dt, want - c.steer));   // counter-steer unwinds at the release rate first
+    } else {
+      c.holdT = 0;
+      c.steer += Math.max(-s.fall * dt, Math.min(s.fall * dt, -c.steer));
+    }
+    c.lastStr = str;
   }
   const maxYaw = Math.min(3.2, ALAT * grip / Math.max(spd, 1));
   let yaw = c.steer * maxYaw * Math.min(spd / 40, 1) * (vF >= 0 ? 1 : -1);
@@ -1686,6 +1697,7 @@ $('#boxBtn').addEventListener('click', toggleBox);
 $('#muteBtn').addEventListener('click', () => { initAudio(); toggleMute(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden && !online.racing && !paused && (state === 'race' || state === 'countdown')) togglePause(); });
 
+$('#ver').textContent = 'Version ' + '18 Nov 19:41' + '.';   // stamped by tools/build.js, so you can tell which build you're playing
 if (!renderer) { $('#glErr').hidden = false; $('#startBtn').disabled = true; }
 selectTrack(trackIdx);
 
