@@ -259,8 +259,8 @@ tr.me td { color: var(--flag); }
     <div class="opts2">
       <div class="opt"><span class="label">Race length</span>
         <div class="seg" id="lapsSeg"><button type="button" data-v="1">1</button><button type="button" data-v="3">3</button><button type="button" data-v="5">5</button><button type="button" data-v="8">8</button></div></div>
-      <div class="opt"><span class="label">Field</span>
-        <div class="seg" id="diffSeg"><button type="button" data-v="rookie">Rookie</button><button type="button" data-v="pro">Pro</button></div></div>
+      <div class="slider"><div class="row"><label class="label" for="aiLvl">AI difficulty</label><span class="mono" id="aiLvlV"></span></div>
+        <input type="range" id="aiLvl" min="1" max="100" step="1"></div>
     </div>
     <div class="opts2">
       <div class="opt"><span class="label">Starting tyre</span>
@@ -306,6 +306,8 @@ tr.me td { color: var(--flag); }
           <div class="opt"><span class="label">Race length</span><div class="seg" id="lLaps"><button type="button" data-v="1">1</button><button type="button" data-v="3">3</button><button type="button" data-v="5">5</button><button type="button" data-v="8">8</button></div></div>
           <div class="opt"><span class="label">Grid</span><label class="switch"><input type="checkbox" id="lAi" checked>Fill with AI</label></div>
         </div>
+        <div class="slider" id="lAiLvlRow"><div class="row"><label class="label" for="lAiLvl">AI difficulty</label><span class="mono" id="lAiLvlV"></span></div>
+          <input type="range" id="lAiLvl" min="1" max="100" step="1"></div>
       </div>
       <p class="note" id="lSummary" hidden></p>
       <button class="btn" id="lStart" type="button">Start race</button>
@@ -871,7 +873,17 @@ const ROSTER = [
   { code: 'YOU', name: 'You', color: '#ffd400', dark: '#1a1a1a', helmet: '#e8462b', me: true },
   { code: 'LIN', name: 'Erik Lindqvist', color: '#d7dbe2', dark: '#3b404a', helmet: '#1fb6ff' },
 ];
-const SKILL = { rookie: [0.93, 0.91, 0.89, 0.87, 0, 0.85], pro: [1.0, 0.99, 0.975, 0.96, 0, 0.95] };
+// AI difficulty 1-100 -> how much of each corner's limit the AI uses (skill) and how much engine it uses (power).
+// 1 ≈ a gentle learner (55% of corner speed, 78% power); 100 ≈ near-perfect laps (108% of the AI's racing line,
+// close to the car's full grip). Rivals in one race are spread ~1.2% apart so there's always someone to chase.
+const AI_NAMES = [[25, 'Learner'], [50, 'Club'], [75, 'Racer'], [90, 'Pro'], [100, 'Alien']];
+const aiLevelName = l => AI_NAMES.find(([max]) => l <= max)[1];
+function aiSkill(level, rank) {
+  const t = (Math.max(1, Math.min(100, level)) - 1) / 99;
+  // lap time goes roughly as 1/skill, so interpolate 1/skill: each step on the slider takes off a similar amount of time
+  const skill = 1 / (1 / 0.55 + (1 / 1.08 - 1 / 0.55) * t);
+  return { skill: skill * (1 - 0.012 * rank), power: 0.78 + 0.22 * t };
+}
 // online liveries, one per grid slot (up to 8 cars)
 const PALETTE = [
   { color: '#ffd400', dark: '#1a1a1a' }, { color: '#e8462b', dark: '#7a1d0f' }, { color: '#1fb6ff', dark: '#0b4a6b' }, { color: '#8a6bff', dark: '#33236e' },
@@ -883,7 +895,7 @@ const esc = s => String(s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;
 let cars = [], player = null;
 let state = 'menu', paused = false;
 let raceTime = 0, cdTime = 0, lightsOutAt = 5, finishCount = 0, resultsAt = -1;
-let LAPS = 3, diff = 'rookie', trackIdx = 0, startTyre = 'M', camMode = 'chase', kbBot = false;
+let LAPS = 3, aiLevel = 55, trackIdx = 0, startTyre = 'M', camMode = 'chase', kbBot = false;
 // player control feel, set by the viewer on the Controls panel (1 = softest, 10 = sharpest; pressure in %)
 const CONTROL_DEFAULTS = { steer: 5, throttle: 5, brake: 5, pressure: 85 };
 let controls = Object.assign({}, CONTROL_DEFAULTS);
@@ -908,7 +920,7 @@ const store = {
   set(k, v) { try { localStorage.setItem('kerbline-' + k, String(v)); } catch (e) {} },
 };
 { const v = parseInt(store.get('laps')); if ([1, 3, 5, 8].includes(v)) LAPS = v; }
-{ const v = store.get('diff'); if (v === 'pro' || v === 'rookie') diff = v; }
+{ const v = parseInt(store.get('ailevel')); if (v >= 1 && v <= 100) aiLevel = v; else if (store.get('diff') === 'pro') aiLevel = 80; }
 { const v = parseInt(store.get('track')); if (v >= 0 && v < TRACKS.length) trackIdx = v; }
 { const v = store.get('tyre'); if (TYRES[v]) startTyre = v; }
 { const v = store.get('cam'); if (['tcam', 'chase', 'cockpit'].includes(v)) camMode = v; }
@@ -937,7 +949,8 @@ function bestTyreFor(remaining, bias) {
 }
 
 // roster entries: { code, name, color, dark, helmet, me?, ai?, remote?, skill?, peer?, aiSlot? }
-function offlineRoster() { return ROSTER.map((r, k) => Object.assign({}, r, { ai: !r.me, skill: SKILL[diff][k] })); }
+const AI_RANK = [0, 1, 2, 3, 0, 4];   // ROSTER order -> speed rank among the AI (slot 4 is the player)
+function offlineRoster() { return ROSTER.map((r, k) => Object.assign({}, r, { ai: !r.me }, r.me ? {} : aiSkill(aiLevel, AI_RANK[k]))); }
 function newRace(roster, lights) {
   roster = roster || offlineRoster();
   carsGroup && disposeGroup(carsGroup);
@@ -953,7 +966,7 @@ function newRace(roster, lights) {
       k, x: PX[i] + NX[i] * lat, y: PY[i] + NY[i] * lat, h: Math.atan2(TY[i], TX[i]),
       vx: 0, vy: 0, vF: 0, spd: 0, steer: 0, idx: i, d: lat, lap: 0, maxLap: 0, progress: i,
       lapStart: 0, secStart: 0, secDone: 0, lastLap: null, bestLap: null, finished: false, finishTime: 0,
-      grass: false, stuck: 0, bestProg: i, resets: 0, ai: !!r.ai, remote: !!r.remote, gone: false, skill: r.skill || 0.9, react: 0.12 + Math.random() * 0.3,
+      grass: false, stuck: 0, bestProg: i, resets: 0, ai: !!r.ai, remote: !!r.remote, gone: false, skill: r.skill || 0.9, power: r.power || 1, react: 0.12 + Math.random() * 0.3,
       lane: lat, laneT: lat, laneTimer: 2 + Math.random() * 3, rev: 0.2,
       tyre, wear: 0, life: tyreLife(tyre), stops: 0, planLap: Math.max(1, Math.round(LAPS * (0.35 + Math.random() * 0.3))), pit: null, boxReq: false, nextTyre: null, bias: (Math.random() - 0.5) * 0.2,
     });
@@ -1229,7 +1242,7 @@ function crossLine(c) {
   if (c.lap > LAPS && !c.finished) {
     c.finished = true; c.finishTime = raceTime; finishCount++; c.boxReq = false;
     c.place = 1 + cars.filter(o => o !== c && o.finished && !o.gone).length;   // counts finishers driven in other browsers too
-    if (c === player) { state = 'finished'; c.ai = true; c.skill = 0.6; banner(c.place === 1 ? 'Winner!' : 'P' + c.place, c.place === 1 ? 'go' : '', 2.5); resultsAt = raceTime + 2.2; }
+    if (c === player) { state = 'finished'; c.ai = true; c.skill = 0.6; c.power = 0.8; banner(c.place === 1 ? 'Winner!' : 'P' + c.place, c.place === 1 ? 'go' : '', 2.5); resultsAt = raceTime + 2.2; }
   }
 }
 
@@ -1254,7 +1267,7 @@ function aiControl(c, dt) {
   while (dA > Math.PI) dA -= 2 * Math.PI; while (dA < -Math.PI) dA += 2 * Math.PI;
   const tgt = PROF[(c.idx + 4) % N] * c.skill * Math.sqrt(gripOf(c));
   const go = raceTime > c.react;
-  return { thr: go && c.vF < tgt, brk: c.vF > tgt + 13, str: Math.max(-1, Math.min(1, dA * 3)) };
+  return { thr: go && c.vF < tgt ? (c.power || 1) : 0, brk: c.vF > tgt + 13, str: Math.max(-1, Math.min(1, dA * 3)) };
 }
 
 function collide() {
@@ -1510,7 +1523,7 @@ function showResults() {
 // Everything travels as presence (absolute state, ~30/s, handed to newcomers): each driver's car,
 // the host's lobby settings + start signal, and the host's AI cars. Nothing is stored.
 const online = { api: null, apiReady: false, room: null, code: '', active: false, racing: false, isHost: false, connected: true,
-  lastSeq: null, settings: { track: 0, laps: 3, ai: true }, order: [], joinedAt: 0, sendAcc: 0, checkAcc: 0, hostPeer: null, unsubs: [], status: 'lobby' };
+  lastSeq: null, settings: { track: 0, laps: 3, ai: true, aiLevel: 55 }, order: [], joinedAt: 0, sendAcc: 0, checkAcc: 0, hostPeer: null, unsubs: [], status: 'lobby' };
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const roomName = code => 'kgp-' + code.toLowerCase();
 const cleanName = s => String(s || '').replace(/[\u0000-\u001f\u007f-\u009f­​-‏‪-‮⁠-⁯﻿]/g, '').trim().slice(0, 14);
@@ -1523,7 +1536,7 @@ const codeOf = nm => (nm.replace(/[^A-Za-z0-9]/g, '').slice(0, 3) || 'DRV').toUp
 })();
 function lobbyMsg(t) { $('#lobbyMsg').textContent = t || ''; }
 function myPeer() { const p = online.room && online.room.peers().find(x => x.sameTab); return p ? p.peer : null; }
-function lobbyObj(phase, extra) { return Object.assign({ phase, seq: online.lastSeq, track: online.settings.track, laps: online.settings.laps, ai: online.settings.ai, diff }, extra || {}); }
+function lobbyObj(phase, extra) { return Object.assign({ phase, seq: online.lastSeq, track: online.settings.track, laps: online.settings.laps, ai: online.settings.ai, aiLevel: online.settings.aiLevel }, extra || {}); }
 // the earliest host claim wins (the lobby's creator), so a late or duplicate claim always steps down
 function hostPeerObj() {
   const hosts = online.room.peers().filter(p => p.presence && p.presence.host === true);
@@ -1551,7 +1564,7 @@ async function joinLobby(code, asHost) {
     return;
   }
   Object.assign(online, { room, code, active: true, isHost: !!asHost, status: 'lobby', lastSeq: null, order: [], joinedAt: performance.now() });
-  online.settings = { track: trackIdx, laps: LAPS, ai: true };
+  online.settings = { track: trackIdx, laps: LAPS, ai: true, aiLevel };
   online.unsubs = [
     room.onPeers(change => {
       for (const p of change.joined) if (!online.order.includes(p.peer)) online.order.push(p.peer);
@@ -1619,15 +1632,15 @@ function startOnlineRace(L, hostPeer) {
   const ps = online.room.peers(), me = myPeer();
   const laps = [1, 3, 5, 8].includes(L.laps) ? L.laps : 3;
   const track = Number.isInteger(L.track) && L.track >= 0 && L.track < TRACKS.length ? L.track : 0;
-  const lvl = L.diff === 'pro' ? 'pro' : 'rookie';
+  const lvl = Number.isFinite(L.aiLevel) ? Math.max(1, Math.min(100, Math.round(L.aiLevel))) : 55;
   LAPS = laps;
   selectTrack(track);
-  const aiPool = ROSTER.filter(r => !r.me), aiSkill = [0, 1, 2, 3, 5].map(k => SKILL[lvl][k]);
+  const aiPool = ROSTER.filter(r => !r.me);
   const roster = L.grid.slice(0, MAX_GRID).map((g, k) => {
     const pal = PALETTE[k % PALETTE.length];
     if (g && Number.isInteger(g.ai)) {
       const r = aiPool[g.ai % aiPool.length];
-      return { code: r.code, name: r.name + ' (AI)', color: pal.color, dark: pal.dark, helmet: r.helmet, ai: online.isHost, remote: !online.isHost, aiSlot: g.ai, skill: aiSkill[g.ai % 5], tyre: aiStartTyre(k % 6) };
+      return { code: r.code, name: r.name + ' (AI)', color: pal.color, dark: pal.dark, helmet: r.helmet, ai: online.isHost, remote: !online.isHost, aiSlot: g.ai, ...aiSkill(lvl, g.ai % 5), tyre: aiStartTyre(k % 6) };
     }
     const p = ps.find(x => x.peer === (g && g.p)), nm = cleanName(p && p.presence.nm) || 'Driver', mine = g && g.p === me;
     return { code: codeOf(nm), name: nm, color: pal.color, dark: pal.dark, helmet: '#f4f1ea', me: mine, remote: !mine, peer: g && g.p };
@@ -1721,9 +1734,11 @@ function paintLobby() {
   const sum = $('#lSummary'); sum.hidden = online.isHost;
   if (!online.isHost) {
     const h = hostPeerObj(), L = h && h.presence.lobby;
-    sum.textContent = L && TRACKS[L.track] ? `${TRACKS[L.track].name} · ${L.laps} ${L.laps === 1 ? 'lap' : 'laps'} · ${L.ai ? 'grid filled with AI' : 'drivers only'}. Waiting for the host to start.` : 'Waiting for the host…';
+    sum.textContent = L && TRACKS[L.track] ? `${TRACKS[L.track].name} · ${L.laps} ${L.laps === 1 ? 'lap' : 'laps'} · ${L.ai ? 'grid filled with AI (difficulty ' + (Number.isFinite(L.aiLevel) ? Math.round(L.aiLevel) : 55) + ')' : 'drivers only'}. Waiting for the host to start.` : 'Waiting for the host…';
   } else {
     $('#lTrack').value = String(online.settings.track); $('#lAi').checked = online.settings.ai;
+    $('#lAiLvl').value = String(online.settings.aiLevel); $('#lAiLvlV').textContent = online.settings.aiLevel + ' · ' + aiLevelName(online.settings.aiLevel);
+    $('#lAiLvlRow').hidden = !online.settings.ai;
     document.querySelectorAll('#lLaps button').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.v === online.settings.laps)));
   }
   if (!online.connected) lobbyMsg('Reconnecting…');
@@ -1733,6 +1748,7 @@ $('#lTrack').innerHTML = TRACKS.map((t, i) => `<option value="${i}">R${String(i 
 $('#lTrack').addEventListener('change', e => hostSetting({ track: +e.target.value }));
 $('#lLaps').addEventListener('click', e => { const b = e.target.closest('button'); if (b) hostSetting({ laps: +b.dataset.v }); });
 $('#lAi').addEventListener('change', e => hostSetting({ ai: e.target.checked }));
+$('#lAiLvl').addEventListener('input', e => hostSetting({ aiLevel: +e.target.value }));
 $('#codeIn').addEventListener('input', e => { e.target.value = e.target.value.toUpperCase().split('').filter(ch => CODE_CHARS.includes(ch)).join('').slice(0, 5); });
 $('#createBtn').addEventListener('click', () => { let c = ''; for (let k = 0; k < 5; k++) c += CODE_CHARS[(Math.random() * CODE_CHARS.length) | 0]; joinLobby(c, true); });
 $('#joinBtn').addEventListener('click', () => { const c = $('#codeIn').value; if (c.length !== 5) { lobbyMsg('Lobby codes are 5 characters.'); return; } joinLobby(c, false); });
@@ -1772,7 +1788,9 @@ function seg(id, get, set) {
   paint();
 }
 seg('#lapsSeg', () => LAPS, v => { LAPS = +v; store.set('laps', v); });
-seg('#diffSeg', () => diff, v => { diff = v; store.set('diff', v); });
+function paintAiLevel() { $('#aiLvl').value = String(aiLevel); $('#aiLvlV').textContent = aiLevel + ' · ' + aiLevelName(aiLevel); }
+$('#aiLvl').addEventListener('input', e => { aiLevel = +e.target.value; store.set('ailevel', aiLevel); paintAiLevel(); });
+paintAiLevel();
 seg('#tyreSeg', () => startTyre, v => { startTyre = v; store.set('tyre', v); });
 seg('#camSeg', () => camMode, v => { camMode = v; store.set('cam', v); });
 // ---- Controls panel ----
@@ -1824,7 +1842,7 @@ $('#boxBtn').addEventListener('click', toggleBox);
 $('#muteBtn').addEventListener('click', () => { initAudio(); toggleMute(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden && !online.racing && !paused && (state === 'race' || state === 'countdown')) togglePause(); });
 
-$('#ver').textContent = 'Version ' + '19 Nov 18:55' + '.';   // stamped by tools/build.js, so you can tell which build you're playing
+$('#ver').textContent = 'Version ' + '19 Nov 19:04' + '.';   // stamped by tools/build.js, so you can tell which build you're playing
 if (!renderer) { $('#glErr').hidden = false; $('#startBtn').disabled = true; }
 selectTrack(trackIdx);
 
