@@ -382,7 +382,7 @@ const TYRE_ORDER = ['S', 'M', 'H'];
 
 // ---------- per-track geometry ----------
 let T = null, W = 0, H = 0, N = 0;
-let PX, PY, TX, TY, NX, NY, PROF, CURV, LIML, LIMR, KERBF, SEC, CUMD;
+let PX, PY, TX, TY, NX, NY, PROF, CURV, LIML, LIMR, KERBF, SEC, CUMD, KERBL, KERBR, HW;
 let buckets = null, BW = 0, BH = 0; const CELL = 256;
 let pitSide = 1, standSide = -1;
 
@@ -396,13 +396,19 @@ function loadTrack(t) {
   raw.forEach(p => { minx = Math.min(minx, p[0]); maxx = Math.max(maxx, p[0]); miny = Math.min(miny, p[1]); maxy = Math.max(maxy, p[1]); });
   raw.forEach(p => { p[0] += MARGIN - minx; p[1] += MARGIN - miny; });
   W = Math.ceil(maxx - minx + 2 * MARGIN); H = Math.ceil(maxy - miny + 2 * MARGIN);
+  // centripetal Catmull-Rom through the surveyed points: unlike the uniform version it can't overshoot into
+  // loops or cusps where a very short gap between points sits next to a long one (Bahrain's last corners)
   const dense = [], n = raw.length;
+  const knot = (a, b) => Math.max(1e-3, Math.sqrt(Math.hypot(b[0] - a[0], b[1] - a[1])));
   for (let i = 0; i < n; i++) {
     const p0 = raw[(i - 1 + n) % n], p1 = raw[i], p2 = raw[(i + 1) % n], p3 = raw[(i + 2) % n];
+    const t0 = 0, t1 = t0 + knot(p0, p1), t2 = t1 + knot(p1, p2), t3 = t2 + knot(p2, p3);
+    const lerpP = (a, b, ta, tb, t) => [a[0] + (b[0] - a[0]) * (t - ta) / (tb - ta), a[1] + (b[1] - a[1]) * (t - ta) / (tb - ta)];
     for (let s = 0; s < 24; s++) {
-      const u = s / 24, u2 = u * u, u3 = u2 * u;
-      const f = k => 0.5 * (2 * p1[k] + (-p0[k] + p2[k]) * u + (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * u2 + (-p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]) * u3);
-      dense.push([f(0), f(1)]);
+      const t = t1 + (t2 - t1) * s / 24;
+      const A1 = lerpP(p0, p1, t0, t1, t), A2 = lerpP(p1, p2, t1, t2, t), A3 = lerpP(p2, p3, t2, t3, t);
+      const B1 = lerpP(A1, A2, t0, t2, t), B2 = lerpP(A2, A3, t1, t3, t);
+      dense.push(lerpP(B1, B2, t1, t2, t));
     }
   }
   let out = resample(dense);
@@ -412,6 +418,8 @@ function loadTrack(t) {
       out[i][k] = (cp[(i - 2 + m) % m][k] + 4 * cp[(i - 1 + m) % m][k] + 6 * cp[i][k] + 4 * cp[(i + 1) % m][k] + cp[(i + 2) % m][k]) / 16;
   }
   // open up any corner tighter than a real hairpin (~14 m radius) by smoothing just that stretch
+  // open up survey kinks toward a ~14 m radius. Hairpins whose two legs sit close together can't open
+  // further (Monaco's Grand Hotel), so the road is narrowed there instead (HW below).
   const RMIN = 14 * SCALE;
   for (let pass = 0; pass < 400; pass++) {
     const m = out.length, mark = new Uint8Array(m);
@@ -460,7 +468,8 @@ function loadTrack(t) {
   BW = Math.ceil(W / CELL); BH = Math.ceil(H / CELL);
   buckets = Array.from({ length: BW * BH }, () => []);
   for (let i = 0; i < N; i++) buckets[Math.floor(PY[i] / CELL) * BW + Math.floor(PX[i] / CELL)].push(i);
-  // walls: runoff shrinks where another stretch of track runs close by (street circuits, hairpins)
+  // half the distance to any other stretch of track running alongside, on each side (street circuits, hairpin legs)
+  const GL = new Float32Array(N), GR = new Float32Array(N);
   for (let i = 0; i < N; i++) {
     let gl = HALF + RUNOFF, gr = HALF + RUNOFF;
     eachNear(PX[i], PY[i], j => {
@@ -471,10 +480,36 @@ function loadTrack(t) {
       const half = dist / 2 - 3;
       if (dx * NX[i] + dy * NY[i] > 0) gr = Math.min(gr, half); else gl = Math.min(gl, half);
     });
-    LIML[i] = Math.max(HALF + KERB + 3, gl); LIMR[i] = Math.max(HALF + KERB + 3, gr);
+    GL[i] = gl; GR[i] = gr;
   }
+  // road half-width: full HALF normally, narrowed where (a) a bend is so tight the inside edge would fold
+  // (at most 80% of its radius) or (b) another stretch of track runs so close the two roads and kerbs would
+  // overlap. Never under ~6 m, and tapered in and out so the change is gradual.
+  HW = new Float32Array(N);
+  { const raw = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      let k = 0; for (let o = -6; o <= 6; o++) k = Math.max(k, Math.abs(CURV[(i + o + N) % N]));
+      raw[i] = Math.max(17, Math.min(HALF, k > 0 ? 0.8 / k : HALF, Math.min(GL[i], GR[i]) - KERB - 2));
+    }
+    const mn = new Float32Array(N);
+    for (let i = 0; i < N; i++) { let m = HALF; for (let o = -8; o <= 8; o++) m = Math.min(m, raw[(i + o + N) % N]); mn[i] = m; }
+    for (let i = 0; i < N; i++) { let s = 0; for (let o = -6; o <= 6; o++) s += mn[(i + o + N) % N]; HW[i] = Math.min(raw[i], s / 13); }
+  }
+  // walls: run-off shrinks to the gap above, but always leaves the road and kerb clear
+  for (let i = 0; i < N; i++) { LIML[i] = Math.max(HW[i] + KERB + 3, GL[i]); LIMR[i] = Math.max(HW[i] + KERB + 3, GR[i]); }
   const sm = (A) => { const B = A.slice(); for (let i = 0; i < N; i++) { let m = Infinity; for (let o = -5; o <= 5; o++) m = Math.min(m, A[(i + o + N) % N]); B[i] = m; } return B; };
   LIML = sm(LIML); LIMR = sm(LIMR);
+  // inside of a corner: nothing may reach past the corner's own centre, or kerbs overlap and walls cross the track.
+  // Right-hand bends (CURV > 0) have their inside on the +normal side (LIMR / KERBR), left-hand bends on the other.
+  KERBR = new Float32Array(N); KERBL = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    let kr = 0, kl = 0;
+    for (let o = -6; o <= 6; o++) { const c = CURV[(i + o + N) % N]; if (c > 0) kr = Math.max(kr, c); else kl = Math.max(kl, -c); }
+    const rR = kr > 0 ? 1 / kr : Infinity, rL = kl > 0 ? 1 / kl : Infinity;
+    const h = HW[i];
+    LIMR[i] = Math.min(LIMR[i], Math.max(h + 3, 0.94 * rR)); LIML[i] = Math.min(LIML[i], Math.max(h + 3, 0.94 * rL));
+    KERBR[i] = Math.min(h + KERB, Math.max(h + 1, 0.88 * rR)); KERBL[i] = Math.min(h + KERB, Math.max(h + 1, 0.88 * rL));
+  }
   let sl = 0, sr = 0;
   for (let o = -PIT_IN; o <= PIT_OUT; o++) { const i = (o + N) % N; sl += LIML[i]; sr += LIMR[i]; }
   pitSide = sr >= sl ? 1 : -1; standSide = -pitSide;
@@ -503,6 +538,8 @@ function eachNear(x, y, fn) {
 function nearestDist(x, y) { let best = Infinity; eachNear(x, y, j => { const d = (PX[j] - x) ** 2 + (PY[j] - y) ** 2; if (d < best) best = d; }); return Math.sqrt(best); }
 // is world point (x,y) on another stretch of road than the one around index i?
 function onOtherRoad(x, y, i, margin) { let hit = false; eachNear(x, y, j => { if (!hit && idxDist(i, j) > 28 && (PX[j] - x) ** 2 + (PY[j] - y) ** 2 < margin * margin) hit = true; }); return hit; }
+// is (x,y) on the tarmac or kerb of a different stretch of track, using that stretch's own width?
+function onOtherTarmac(x, y, i) { let hit = false; eachNear(x, y, j => { if (!hit && idxDist(i, j) > 28) { const r = HW[j] + KERB; if ((PX[j] - x) ** 2 + (PY[j] - y) ** 2 < r * r) hit = true; } }); return hit; }
 // pole sits ~14 m behind the line, then one car every ~9 m (staggered left/right), like a real grid
 function gridIndex(k) { return (N - 6 - k * 4 + N) % N; }
 function gridLat(k) { return (k % 2 ? 1 : -1) * 15; }
@@ -618,6 +655,13 @@ class Geo {
   }
 }
 const rgb = hex => { const c = new THREE.Color(hex); return [c.r, c.g, c.b]; };
+// does the line offset (signed) from the centre line still run forwards between points i and j? At the tip of a very
+// tight hairpin an inside offset doubles back on itself; kerbs and walls skip those pieces instead of crossing over.
+function runsForward(i, j, oi, oj) {
+  const dx = PX[j] - PX[i], dy = PY[j] - PY[i];
+  const ox = PX[j] + NX[j] * oj - PX[i] - NX[i] * oi, oy = PY[j] + NY[j] * oj - PY[i] - NY[i] * oi;
+  return ox * dx + oy * dy > 0.25 * (dx * dx + dy * dy);
+}
 const at = (i, off, h) => [PX[i] + NX[i] * off, PY[i] + NY[i] * off, h || 0];
 
 function disposeGroup(g) {
@@ -647,15 +691,19 @@ function buildTrackScene() {
     runoff.quad(at(i, -LIML[i]), at(j, -LIML[j]), at(j, LIMR[j]), at(i, LIMR[i]), cRun);
     // gravel traps on the outside of the faster corners
     if (KERBF[i] && Math.abs(CURV[i]) < 1 / 90) {
-      const s = CURV[i] > 0 ? -1 : 1, a0 = HALF + 30, b0 = lim(i, s) - 4, b1 = lim(j, s) - 4;
+      const s = CURV[i] > 0 ? -1 : 1, a0 = HW[i] + 30, b0 = lim(i, s) - 4, b1 = lim(j, s) - 4;
       if (b0 > a0 + 10 && b1 > a0 + 10) gravel.quad(at(i, s * a0), at(j, s * a0), at(j, s * b1), at(i, s * b0), cGravel);
     }
     const v0 = CUMD[i] * U / 7, v1 = CUMD[i + 1] * U / 7;
-    road.quad(at(i, -HALF), at(j, -HALF), at(j, HALF), at(i, HALF), null, [[0, v0], [0, v1], [3, v1], [3, v0]]);
-    for (const s of [-1, 1]) lines.quad(at(i, s * (HALF - 3.5)), at(j, s * (HALF - 3.5)), at(j, s * (HALF - 1.5)), at(i, s * (HALF - 1.5)), rgb(0xf4f1ea));
+    const hi = HW[i], hj = HW[j];
+    road.quad(at(i, -hi), at(j, -hj), at(j, hj), at(i, hi), null, [[0, v0], [0, v1], [3, v1], [3, v0]]);
+    for (const s of [-1, 1]) lines.quad(at(i, s * (hi - 3.5)), at(j, s * (hj - 3.5)), at(j, s * (hj - 1.5)), at(i, s * (hi - 1.5)), rgb(0xf4f1ea));
     if (KERBF[i]) for (const s of [-1, 1]) {
       const col = (i >> 1) % 2 ? rgb(0xf4f1ea) : rgb(0xd6262c);
-      kerb.quad(at(i, s * HALF), at(j, s * HALF), at(j, s * (HALF + KERB), 0.05), at(i, s * (HALF + KERB), 0.05), col);
+      const ki = s > 0 ? KERBR[i] : KERBL[i], kj = s > 0 ? KERBR[j] : KERBL[j];   // narrower kerb on the inside of very tight bends
+      if (!runsForward(i, j, s * ki, s * kj) || ki - HW[i] < 3.5 || kj - HW[j] < 3.5) continue;   // no slivers squeezed into a hairpin tip
+      { const a = at(i, s * ki), b = at(j, s * kj); if (onOtherTarmac(a[0], a[1], i) || onOtherTarmac(b[0], b[1], j)) continue; }   // never over another stretch's road
+      kerb.quad(at(i, s * HW[i]), at(j, s * HW[j]), at(j, s * kj, 0.05), at(i, s * ki, 0.05), col);
     }
     if (inPit(i) && inPit(j)) {
       const oi = pitOffset(i) * pitSide, oj = pitOffset(j) * pitSide;
@@ -701,7 +749,8 @@ function buildTrackScene() {
       const pitWall = s === pitSide && r >= -PIT_IN && r <= PIT_OUT;
       if (pitWall && (r < -PIT_IN + RAMP + 4 || r > PIT_OUT - RAMP - 4)) continue;           // pit entry / exit openings
       const pi = at(i, oi), pj = at(j, oj);
-      if (onOtherRoad(pi[0], pi[1], i, HALF + KERB + 4) || onOtherRoad(pj[0], pj[1], j, HALF + KERB + 4)) continue;
+      if (!runsForward(i, j, oi, oj)) continue;
+      if (onOtherTarmac(pi[0], pi[1], i) || onOtherTarmac(pj[0], pj[1], j)) continue;
       if (pitWall) { conc.quad(at(i, oi, 0), at(j, oj, 0), at(j, oj, 1.1), at(i, oi, 1.1), cConc); continue; }
       wall.quad(at(i, oi, 0), at(j, oj, 0), at(j, oj, 0.7), at(i, oi, 0.7), cTyre);
       wall.quad(at(i, oi, 0.7), at(j, oj, 0.7), at(j, oj, 1.25), at(i, oi, 1.25), bands[Math.floor(i / 9) % bands.length]);
@@ -1019,7 +1068,8 @@ function drive(c, dt, thrKey, brkKey, str) {
 function physics(c, dt, thr, brk, str) {
   const fx = Math.cos(c.h), fy = Math.sin(c.h);
   let vF = c.vx * fx + c.vy * fy, vL = -c.vx * fy + c.vy * fx;
-  const grass = Math.abs(c.d) > HALF + KERB, gf = gripOf(c), grip = (grass ? 0.55 : 1) * gf;
+  // off the kerb = grass/run-off; kerb edges follow the local road width (narrower at the tightest hairpins)
+  const grass = c.d > 0 ? c.d > KERBR[c.idx] : -c.d > KERBL[c.idx], gf = gripOf(c), grip = (grass ? 0.55 : 1) * gf;
   let a = 0;
   // thr / brk are pedal amounts 0..1 (the AI passes true/false, which count as 1/0)
   if (thr > 0) a += thr * ACC * (1 - vF / VMAX) * (grass ? 0.6 : 1) * (0.85 + 0.15 * gf);
@@ -1198,7 +1248,8 @@ function aiControl(c, dt) {
   }
   c.lane += (c.laneT - c.lane) * Math.min(1, dt * 1.6);
   const look = 34 + (kbBot && c === player ? 0.75 : 0.45) * Math.abs(c.vF), j = (c.idx + Math.round(look / DS)) % N;   // test bot anticipates like a human would
-  const tx = PX[j] + NX[j] * c.lane, ty = PY[j] + NY[j] * c.lane;
+  const lane = Math.max(-(HW[j] - 8), Math.min(HW[j] - 8, c.lane));   // keep the AI's line inside a narrowed hairpin
+  const tx = PX[j] + NX[j] * lane, ty = PY[j] + NY[j] * lane;
   let dA = Math.atan2(ty - c.y, tx - c.x) - c.h;
   while (dA > Math.PI) dA -= 2 * Math.PI; while (dA < -Math.PI) dA += 2 * Math.PI;
   const tgt = PROF[(c.idx + 4) % N] * c.skill * Math.sqrt(gripOf(c));
@@ -1244,7 +1295,7 @@ function update(dt) {
     else drive(c, dt, pThr, pBrk, pStr);
     // recovery: a car that makes no forward progress for 3 s (wedged on a wall, spun round) is put back on the racing line
     if (c.progress > c.bestProg + 2) { c.bestProg = c.progress; c.stuck = 0; } else c.stuck += dt;
-    if (c.stuck > 3 && raceTime > 4 && (c.ai || Math.abs(c.d) > HALF)) {
+    if (c.stuck > 3 && raceTime > 4 && (c.ai || Math.abs(c.d) > HW[c.idx])) {
       const i = (c.idx + 3) % N; c.x = PX[i]; c.y = PY[i]; c.h = Math.atan2(TY[i], TX[i]);
       c.vx = TX[i] * 75; c.vy = TY[i] * 75; c.stuck = 0; c.d = 0; c.resets++; c.yawRate = 0; c.steer = 0;
       if (c === player) banner('Recovered', 'small', 1);
@@ -1287,6 +1338,11 @@ function placeCars() {
   }
 }
 function updateCamera(dt) {
+  if (window.__fixedCam) {   // test view: look straight down on a spot
+    const f = window.__fixedCam;
+    camera.position.set(f.x, f.h, f.z + 0.01); camera.lookAt(f.x, 0, f.z); camera.fov = 55; camera.updateProjectionMatrix();
+    return;
+  }
   if (state === 'menu' || !player) {
     menuT += dt;
     const i = Math.floor(menuT * 9) % N, j = (i + 45) % N, f = (menuT * 9) % 1;
@@ -1768,7 +1824,7 @@ $('#boxBtn').addEventListener('click', toggleBox);
 $('#muteBtn').addEventListener('click', () => { initAudio(); toggleMute(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden && !online.racing && !paused && (state === 'race' || state === 'countdown')) togglePause(); });
 
-$('#ver').textContent = 'Version ' + '18 Nov 19:50' + '.';   // stamped by tools/build.js, so you can tell which build you're playing
+$('#ver').textContent = 'Version ' + '19 Nov 18:55' + '.';   // stamped by tools/build.js, so you can tell which build you're playing
 if (!renderer) { $('#glErr').hidden = false; $('#startBtn').disabled = true; }
 selectTrack(trackIdx);
 
