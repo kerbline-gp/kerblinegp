@@ -1098,17 +1098,20 @@ function physics(c, dt, thr, brk, str) {
   if (c.ai) c.steer += Math.max(-8 * dt, Math.min(8 * dt, str - c.steer));
   else {
     // keyboard-friendly: lock winds on while a key is held, snaps back faster when released,
-    // and the most lock a key can ask for shrinks with speed so a tap at 300 km/h is a nudge, not a swerve
-    // lock follows how long the key has been held, on a curve: (held / full)^2 of the available lock.
-    // A 0.15 s tap asks for ~6% lock, 0.3 s ~25%, full lock after `full` seconds. Pressing again while the wheel
-    // is still turned carries on from the current lock, so pulsing the key feathers it.
+    // and the most lock a key can ask for shrinks with speed so a tap at 300 km/h is a nudge, not a swerve.
+    // Lock eases in over the first 0.12 s (so a tap stays small) and then grows at a STEADY rate until full lock
+    // after `full` seconds — it never speeds up the longer you hold, so there's no late surge into the wall.
+    // Pressing again while the wheel is still turned carries on from the current lock, so pulsing the key feathers it.
     const s = FEEL, cap = 1 - (1 - s.hiCap) * Math.min(1, spd / VMAX);
+    const H0 = 0.12, span = s.full - H0 / 2;
+    const ramp = h => (h < H0 ? h * h / (2 * H0) : h - H0 / 2) / span;
+    const unramp = x => { const y = x * span; return y < H0 / 2 ? Math.sqrt(2 * H0 * y) : y + H0 / 2; };
     if (str !== 0) {
       const same = Math.sign(c.steer) === Math.sign(str) || c.steer === 0;
       if (!same) c.holdT = 0;
-      else if (Math.sign(c.lastStr || 0) !== Math.sign(str)) c.holdT = s.full * Math.sqrt(Math.min(1, Math.abs(c.steer) / cap));
+      else if (Math.sign(c.lastStr || 0) !== Math.sign(str)) c.holdT = unramp(Math.min(1, Math.abs(c.steer) / cap));
       c.holdT = (c.holdT || 0) + dt;
-      const want = str * cap * Math.min(1, (c.holdT / s.full) ** 2);
+      const want = str * cap * Math.min(1, ramp(c.holdT));
       if (same) c.steer = want;
       else c.steer += Math.max(-s.fall * dt, Math.min(s.fall * dt, want - c.steer));   // counter-steer unwinds at the release rate first
     } else {
@@ -1117,7 +1120,9 @@ function physics(c, dt, thr, brk, str) {
     }
     c.lastStr = str;
   }
-  const maxYaw = Math.min(3.2, ALAT * grip / Math.max(spd, 1));
+  // most rotation the car can make: grip-limited, and for the player also capped at ~137°/s (the AI keeps 183°/s,
+  // which its own speed planning never uses outside hairpins) so full lock on a key can't spin the car into a wall
+  const maxYaw = Math.min(c.ai ? 3.2 : 2.4, ALAT * grip / Math.max(spd, 1));
   let yaw = c.steer * maxYaw * Math.min(spd / 40, 1) * (vF >= 0 ? 1 : -1);
   if (!c.ai) {
     // yaw inertia: the car takes ~0.1 s to settle into the rotation the steering asks for, instead of snapping to it
@@ -1842,7 +1847,7 @@ $('#boxBtn').addEventListener('click', toggleBox);
 $('#muteBtn').addEventListener('click', () => { initAudio(); toggleMute(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden && !online.racing && !paused && (state === 'race' || state === 'countdown')) togglePause(); });
 
-$('#ver').textContent = 'Version ' + '19 Nov 19:04' + '.';   // stamped by tools/build.js, so you can tell which build you're playing
+$('#ver').textContent = 'Version ' + '20 Nov 19:14' + '.';   // stamped by tools/build.js, so you can tell which build you're playing
 if (!renderer) { $('#glErr').hidden = false; $('#startBtn').disabled = true; }
 selectTrack(trackIdx);
 
