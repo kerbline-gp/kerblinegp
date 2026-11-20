@@ -904,8 +904,8 @@ const lerp = (a, b, t) => a + (b - a) * t;
 function feel() {
   const s = (controls.steer - 1) / 9, t = (controls.throttle - 1) / 9, b = (controls.brake - 1) / 9;
   return {
-    full: lerp(1.05, 0.35, s),          // seconds of holding a steering key to reach full lock
-    hiCap: lerp(0.62, 0.95, s),         // share of lock a key can ask for at top speed
+    full: lerp(0.8, 0.25, s),           // seconds of holding a steering key to reach full lock (default ~0.55 s)
+    hiCap: lerp(0.75, 1.0, s),          // share of lock a key can ask for at top speed
     fall: lerp(3.5, 7, s),              // lock returned to centre per second after release
     thrUp: 1 / lerp(0.95, 0.15, t),     // throttle gained per second while held (full after 0.95 s ... 0.15 s)
     brkUp: 1 / lerp(0.8, 0.12, b),      // brake gained per second while held (full after 0.8 s ... 0.12 s)
@@ -1120,13 +1120,13 @@ function physics(c, dt, thr, brk, str) {
     }
     c.lastStr = str;
   }
-  // most rotation the car can make: grip-limited, and for the player also capped at ~137°/s (the AI keeps 183°/s,
-  // which its own speed planning never uses outside hairpins) so full lock on a key can't spin the car into a wall
-  const maxYaw = Math.min(c.ai ? 3.2 : 2.4, ALAT * grip / Math.max(spd, 1));
+  // most rotation the car can make: grip-limited, and for the player also capped at ~172°/s (AI 183°/s) — enough
+  // for every corner at a realistic speed, hairpins included, without letting full lock spin the car
+  const maxYaw = Math.min(c.ai ? 3.2 : 3.0, ALAT * grip / Math.max(spd, 1));
   let yaw = c.steer * maxYaw * Math.min(spd / 40, 1) * (vF >= 0 ? 1 : -1);
   if (!c.ai) {
-    // yaw inertia: the car takes ~0.1 s to settle into the rotation the steering asks for, instead of snapping to it
-    c.yawRate = (c.yawRate || 0) + (yaw - (c.yawRate || 0)) * (1 - Math.exp(-dt / 0.1));
+    // yaw inertia: the car takes ~0.06 s to settle into the rotation the steering asks for, instead of snapping to it
+    c.yawRate = (c.yawRate || 0) + (yaw - (c.yawRate || 0)) * (1 - Math.exp(-dt / 0.06));
     yaw = c.yawRate;
   }
   c.h += yaw * dt;
@@ -1847,7 +1847,7 @@ $('#boxBtn').addEventListener('click', toggleBox);
 $('#muteBtn').addEventListener('click', () => { initAudio(); toggleMute(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden && !online.racing && !paused && (state === 'race' || state === 'countdown')) togglePause(); });
 
-$('#ver').textContent = 'Version ' + '20 Nov 19:14' + '.';   // stamped by tools/build.js, so you can tell which build you're playing
+$('#ver').textContent = 'Version ' + '20 Nov 19:19' + '.';   // stamped by tools/build.js, so you can tell which build you're playing
 if (!renderer) { $('#glErr').hidden = false; $('#startBtn').disabled = true; }
 selectTrack(trackIdx);
 
